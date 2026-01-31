@@ -971,13 +971,24 @@
         const GOOGLE_SHEET_URL = 'https://script.google.com/macros/s/AKfycby5sWfjOj_0PU9Fhnke6LFdBZmunGA3EeWPk4DKH4-zqnySF6XIap8E5k219NmYkB-N/exec';
         
         // Authentication
-        const VALID_USERNAME = '123';
-        const VALID_PASSWORD = '456';
+        const USERS = {
+            'admin': {
+                username: '123',
+                password: '456',
+                role: 'administrator'
+            },
+            'user': {
+                username: '789',
+                password: '456',
+                role: 'normal'
+            }
+        };
 
         // Storage keys
         const STORAGE_MODULES = 'qc_modules';
         const STORAGE_CLIENTS = 'qc_clients';
         const STORAGE_AUTH = 'qc_authenticated';
+        const STORAGE_USER_ROLE = 'qc_user_role';
 
         // Initialize
         window.onload = function() {
@@ -990,10 +1001,24 @@
             const username = document.getElementById('loginUsername').value;
             const password = document.getElementById('loginPassword').value;
             
-            if (username === VALID_USERNAME && password === VALID_PASSWORD) {
+            // Check against all users
+            let authenticatedUser = null;
+            for (let key in USERS) {
+                if (USERS[key].username === username && USERS[key].password === password) {
+                    authenticatedUser = USERS[key];
+                    break;
+                }
+            }
+            
+            if (authenticatedUser) {
                 localStorage.setItem(STORAGE_AUTH, 'true');
+                localStorage.setItem(STORAGE_USER_ROLE, authenticatedUser.role);
                 document.getElementById('loginScreen').style.display = 'none';
                 document.getElementById('mainApp').style.display = 'block';
+                
+                // Apply role-based UI changes
+                applyRolePermissions(authenticatedUser.role);
+                
                 loadDataFromGoogleSheets();
             } else {
                 document.getElementById('loginError').style.display = 'block';
@@ -1002,14 +1027,56 @@
 
         function checkAuth() {
             if (localStorage.getItem(STORAGE_AUTH) === 'true') {
+                const userRole = localStorage.getItem(STORAGE_USER_ROLE) || 'normal';
                 document.getElementById('loginScreen').style.display = 'none';
                 document.getElementById('mainApp').style.display = 'block';
+                
+                applyRolePermissions(userRole);
                 loadDataFromGoogleSheets();
             }
         }
 
+        function applyRolePermissions(role) {
+            if (role === 'normal') {
+                // Hide Templates tab for normal users
+                const navButtons = document.querySelectorAll('.nav-tab');
+                navButtons.forEach(btn => {
+                    if (btn.textContent === 'Templates') {
+                        btn.style.display = 'none';
+                    }
+                });
+                
+                // Hide Delete buttons for normal users
+                const style = document.createElement('style');
+                style.id = 'normal-user-style';
+                style.textContent = `
+                    .btn-delete { display: none !important; }
+                    .btn-edit { display: inline-block !important; }
+                `;
+                document.head.appendChild(style);
+                
+                // Change Edit button text for normal users
+                setTimeout(() => {
+                    document.querySelectorAll('.btn-edit').forEach(btn => {
+                        btn.textContent = 'Change Stage';
+                    });
+                }, 1000);
+            } else {
+                // Administrator has full access
+                const existingStyle = document.getElementById('normal-user-style');
+                if (existingStyle) {
+                    existingStyle.remove();
+                }
+            }
+        }
+
+        function getUserRole() {
+            return localStorage.getItem(STORAGE_USER_ROLE) || 'normal';
+        }
+
         function logout() {
             localStorage.removeItem(STORAGE_AUTH);
+            localStorage.removeItem(STORAGE_USER_ROLE);
             location.reload();
         }
 
@@ -1167,6 +1234,9 @@
             
             console.log('Fetching data from:', GOOGLE_SHEET_URL);
             
+            const userRole = getUserRole();
+            const editButtonText = userRole === 'normal' ? 'Change Stage' : 'Edit';
+            
             fetch(GOOGLE_SHEET_URL)
                 .then(response => {
                     console.log('Response received:', response);
@@ -1195,6 +1265,11 @@
                             
                             const stageClass = stageClasses[item.stage] || 'status-group-a';
                             
+                            // Show delete button only for administrators
+                            const deleteButton = userRole === 'administrator' 
+                                ? `<button class="btn-delete" onclick="deleteRow(this)" style="margin-left: 8px;">Delete</button>`
+                                : '';
+                            
                             row.innerHTML = `
                                 <td>${item.moduleName || ''}</td>
                                 <td>${item.partNo || ''}</td>
@@ -1202,8 +1277,8 @@
                                 <td><span class="status-badge ${stageClass}">${item.stage || 'Unknown'}</span></td>
                                 <td>${entryDate || ''}</td>
                                 <td>
-                                    <button class="btn-edit" onclick="editRow(this)">Edit</button>
-                                    <button class="btn-delete" onclick="deleteRow(this)" style="margin-left: 8px;">Delete</button>
+                                    <button class="btn-edit" onclick="editRow(this)">${editButtonText}</button>
+                                    ${deleteButton}
                                 </td>
                             `;
                         });
@@ -1358,24 +1433,144 @@
             originalClientName = clientName;
             originalModuleName = moduleName;
             
-            document.getElementById('editModuleName').value = moduleName;
-            document.getElementById('editPartNo').value = partNo;
+            const userRole = getUserRole();
             
-            populateDropdowns();
-            document.getElementById('editClientName').value = clientName;
+            if (userRole === 'normal') {
+                // Normal user: only change stage
+                openStageChangeModal(moduleName, partNo, clientName, currentStage, entryDate);
+            } else {
+                // Administrator: full edit access
+                document.getElementById('editModuleName').value = moduleName;
+                document.getElementById('editPartNo').value = partNo;
+                
+                populateDropdowns();
+                document.getElementById('editClientName').value = clientName;
+                
+                const stageValueMap = {
+                    'Group A': 'group-a',
+                    'Vibration': 'vibration',
+                    'Thermal': 'thermal',
+                    'ANR Testing': 'anr',
+                    'Dispatched': 'dispatched'
+                };
+                
+                document.getElementById('editStage').value = stageValueMap[currentStage];
+                document.getElementById('editEntryDate').value = entryDate;
+                
+                document.getElementById('editModal').classList.add('active');
+            }
+        }
+
+        function openStageChangeModal(moduleName, partNo, clientName, currentStage, entryDate) {
+            // Get next stage
+            const stages = ['Group A', 'Vibration', 'Thermal', 'ANR Testing', 'Dispatched'];
+            const currentIndex = stages.indexOf(currentStage);
             
-            const stageValueMap = {
-                'Group A': 'group-a',
-                'Vibration': 'vibration',
-                'Thermal': 'thermal',
-                'ANR Testing': 'anr',
-                'Dispatched': 'dispatched'
+            let nextStage = currentStage;
+            if (currentIndex >= 0 && currentIndex < stages.length - 1) {
+                nextStage = stages[currentIndex + 1];
+            }
+            
+            // Create custom modal for stage change
+            const modalHtml = `
+                <div class="modal active" id="stageChangeModal">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h3 class="modal-title">Change Stage</h3>
+                            <button class="btn-close" onclick="closeStageChangeModal()">&times;</button>
+                        </div>
+                        <div style="margin-bottom: 20px; padding: 16px; background: rgba(0, 229, 255, 0.1); border: 1px solid var(--accent); border-radius: 8px;">
+                            <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">Module: <strong style="color: var(--text-primary);">${moduleName}</strong></div>
+                            <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">S.No: <strong style="color: var(--text-primary);">${partNo}</strong></div>
+                            <div style="font-size: 13px; color: var(--text-secondary);">Client: <strong style="color: var(--text-primary);">${clientName}</strong></div>
+                        </div>
+                        <div class="form-field">
+                            <label>Current Stage</label>
+                            <input type="text" value="${currentStage}" readonly style="opacity: 0.6; cursor: not-allowed;">
+                        </div>
+                        <div class="form-field">
+                            <label>New Stage</label>
+                            <select id="stageChangeSelect" required>
+                                <option value="group-a" ${nextStage === 'Group A' ? 'selected' : ''}>Group A</option>
+                                <option value="vibration" ${nextStage === 'Vibration' ? 'selected' : ''}>Vibration</option>
+                                <option value="thermal" ${nextStage === 'Thermal' ? 'selected' : ''}>Thermal</option>
+                                <option value="anr" ${nextStage === 'ANR Testing' ? 'selected' : ''}>ANR Testing</option>
+                                <option value="dispatched" ${nextStage === 'Dispatched' ? 'selected' : ''}>Dispatched</option>
+                            </select>
+                        </div>
+                        <div class="modal-buttons">
+                            <button class="btn-cancel" onclick="closeStageChangeModal()">Cancel</button>
+                            <button class="btn-save" onclick="saveStageChange('${moduleName}', '${partNo}', '${clientName}', '${entryDate}')">Change Stage</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            // Remove existing modal if any
+            const existingModal = document.getElementById('stageChangeModal');
+            if (existingModal) {
+                existingModal.remove();
+            }
+            
+            // Add new modal
+            document.body.insertAdjacentHTML('beforeend', modalHtml);
+        }
+
+        function closeStageChangeModal() {
+            const modal = document.getElementById('stageChangeModal');
+            if (modal) {
+                modal.remove();
+            }
+            currentEditRow = null;
+        }
+
+        function saveStageChange(moduleName, partNo, clientName, entryDate) {
+            const newStageValue = document.getElementById('stageChangeSelect').value;
+            
+            const stageNames = {
+                'group-a': 'Group A',
+                'vibration': 'Vibration',
+                'thermal': 'Thermal',
+                'anr': 'ANR Testing',
+                'dispatched': 'Dispatched'
             };
             
-            document.getElementById('editStage').value = stageValueMap[currentStage];
-            document.getElementById('editEntryDate').value = entryDate;
+            const stageClasses = {
+                'group-a': 'status-group-a',
+                'vibration': 'status-vibration',
+                'thermal': 'status-thermal',
+                'anr': 'status-anr',
+                'dispatched': 'status-dispatched'
+            };
             
-            document.getElementById('editModal').classList.add('active');
+            // Update the row
+            if (currentEditRow) {
+                currentEditRow.cells[3].innerHTML = `<span class="status-badge ${stageClasses[newStageValue]}">${stageNames[newStageValue]}</span>`;
+            }
+            
+            // Send to Google Sheets
+            const formData = {
+                moduleName: moduleName,
+                partNo: partNo,
+                clientName: clientName,
+                stage: stageNames[newStageValue],
+                entryDate: entryDate
+            };
+            
+            fetch(GOOGLE_SHEET_URL, {
+                method: 'POST',
+                mode: 'no-cors',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(formData)
+            })
+            .then(() => {
+                setTimeout(() => loadDataFromGoogleSheets(), 1000);
+            })
+            .catch(error => console.error('Error:', error));
+            
+            closeStageChangeModal();
+            updateStats();
+            showNotification('Stage changed successfully!');
         }
 
         function closeEditModal() {
